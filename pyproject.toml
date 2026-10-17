@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mikhail-toolkit"
+version = "0.1.0"
+description = "Reverse-engineering toolkit for Project MIKHAIL: FPD/EPK archive and rigged TSF/BETA export"
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.24", "Pillow>=10.0", "zstandard>=0.21", "texture2ddecoder>=1.0.7"]
+
+[project.scripts]
+mikhail-list = "mikhail.fpd_list:main"
+
+[tool.setuptools]
+packages = ["mikhail"]

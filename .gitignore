@@ -1,0 +1,33 @@
+# game data — never commit
+decryptKey.bin
+*.fbx
+*.glb
+*.obj
+*.png
+*.jpg
+*.jpeg
+!docs/**/*.png
+*.txb
+*.scn
+*.zstd
+*.npy
+names.pkl
+pack_bin_listing.json
+export/
+export_beta/
+export_weapon/
+save_backup/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# misc
+*.log
+*.tmp
+.DS_Store
+Thumbs.db

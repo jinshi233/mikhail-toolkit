@@ -1,0 +1,4 @@
+numpy>=1.24
+Pillow>=10.0
+zstandard>=0.21
+texture2ddecoder>=1.0.7

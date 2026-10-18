@@ -260,7 +260,11 @@ def build_part(data, mesh, arm, base_dir, name, mat_cache):
     n[:, 1] = -nrm[:, 2]
     n[:, 2] = nrm[:, 1]
 
-    me = bpy.data.meshes.new(f"{name}_lod{mesh.get('lod')}_p{mesh['index']}")
+    # Name the object after the BODY PART, not its file position: the mesh order
+    # varies per unit, so "p3" tells the user nothing and hid a real bug (the
+    # F-15 family lists both arms last, Type-94 lists `chest` last).
+    part = mesh.get("part") or f"p{mesh['index']}"
+    me = bpy.data.meshes.new(f"{name}_{part}")
 
     # Faces: <unit>.indices.npy holds one contiguous run per mesh, in mesh
     # order.  Per-mesh submeshes (F-14 / MiG-21 / YF-23 Pav-1) renumber their
@@ -354,7 +358,10 @@ def build_part(data, mesh, arm, base_dir, name, mat_cache):
 
     # material: each part mesh maps to its own part's texture set
     part = mesh.get("part")
-    mats = [m for m in data["materials"] if m["part"] == part] if part else []
+    # Materials are keyed by TEXTURE SET, which is not always the part label:
+    # l_b_mount and r_b_mount both use the "mountb" set, and j_unit uses "unitj".
+    texset = mesh.get("texset") or part
+    mats = [m for m in data["materials"] if m["part"] == texset] if texset else []
     if not mats:
         # Never fall back to "the first set in the file": that builds a material
         # from the WRONG part's maps and caches it under that part's name, so the
@@ -365,7 +372,7 @@ def build_part(data, mesh, arm, base_dir, name, mat_cache):
         print(f"    ! mesh {mesh['index']}: no texture set for part {part!r}; "
               f"using {mats[0]['part'] if mats else None!r} base colour only")
     if mats:
-        key = part if part else mats[0]["part"]
+        key = texset if texset else mats[0]["part"]
         if key not in mat_cache:
             mat_cache[key] = make_material(f"{name}_{key}", mats, base_dir)
         obj.data.materials.append(mat_cache[key])

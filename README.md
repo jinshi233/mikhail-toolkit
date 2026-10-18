@@ -26,6 +26,15 @@ the probes that produced the measurements so the claims can be re-run:
 | skin-block offset moves with stride | "the legs have no binding" | weights at `0x30`/`0x38` for 60 B records, `0x34`/`0x3C` for 64 B |
 | indices are global *or* mesh-local | 85 k loose vertices, cone-shaped limbs | two topologies, told apart arithmetically |
 | `texture2ddecoder` is BLUE-first | every red marking renders blue | swap to RGBA |
+| **LOD0 mesh order varies per unit** | "the chest is missing", materials on the wrong limb | the F-15 family lists both arms last, every Type-94 lists `chest` last; resolve the part from `Mesh.nodeIndex` → node name |
+| **`indexCount` may be absent on the last drawblock** | one object contains the whole body with no limb weights | bound the block by the next drawblock start *anywhere in the scene*, not by the end of the index array |
+| **units borrow textures from siblings** | a part gets no material, or another part's | `type94_jp_00` ships only `leg_bc.png` and points at `../../type94_02/model/…`; resolve the `relative` strings instead of scanning one directory |
+
+The three bold rows were the cause of "every model is broken": a full-body mesh
+with only torso weights, a missing chest, and materials on the wrong parts.  All
+three come from *trusting position* — mesh order, block order, or directory
+layout.  The file states each answer explicitly (`nodeIndex`, the next drawblock
+offset, the `relative` path), so read it instead of inferring.
 
 ## Requirements
 

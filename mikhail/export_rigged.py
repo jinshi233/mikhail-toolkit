@@ -33,27 +33,15 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-try:
-    from .mikhail_assets import FpdArchive, classify_texture, TEX_ROLE  # noqa: E402
-except ImportError:
-    from mikhail_assets import FpdArchive, classify_texture, TEX_ROLE  # noqa: E402
-try:
-    from . import txb_fast  # noqa: E402
-except ImportError:
-    import txb_fast  # noqa: E402
-try:
-    from . import mesh_blobs  # noqa: E402
-except ImportError:
-    import mesh_blobs  # noqa: E402
+from mikhail_assets import FpdArchive, classify_texture, TEX_ROLE  # noqa: E402
+import txb_fast  # noqa: E402
+import mixed_walk  # noqa: E402
+import mesh_blobs  # noqa: E402
 
-try:
-    from . import config as _cfg
-except ImportError:
-    import config as _cfg
-GAME = _cfg.GAME
-PACK = _cfg.PACK
+GAME = r"D:\SteamLibrary\steamapps\common\Project MIKHAIL"
+PACK = os.path.join(GAME, "obb", "pack.bin")
 UNPACK = os.path.dirname(HERE)
-OUT_ROOT = _cfg.OUT
+OUT_ROOT = os.path.join(UNPACK, "export")
 
 BLENDER_CANDIDATES = [
     r"C:\Program Files\Blender Foundation\Blender 4.5\blender.exe",
@@ -123,6 +111,45 @@ def find_units(pack: FpdArchive, kind: str) -> List[Dict]:
     return sorted(units.values(), key=lambda u: u["unit"])
 
 
+def scene_texture_refs(data: bytes, model_dir: str, pack_names):
+    """Texture files a scene references by relative path.
+
+    Units do not necessarily ship their own atlas: type94_jp_00 keeps only
+    leg_bc.png locally and points at siblings for the rest, e.g.
+    "../../type94_02/model/head_ao.png" and
+    "../../type94_jp_rs_00/model/arm_l_cm.png".  Scanning only the unit's own
+    directory therefore produced parts with no texture set at all, which is why
+    those meshes came out with no material or the wrong one.
+
+    Returns [(role, entry_name)] resolved against the archive.
+    """
+    rels = []
+    i = 0
+    while True:
+        j = data.find(b".png", i)
+        if j < 0:
+            break
+        a = j
+        while a > 0 and 32 <= data[a - 1] < 127:
+            a -= 1
+        if a > 0 and (data[a - 1] & 0x7F) in (0x06, 0x26):
+            rel = data[a:j + 4].decode("ascii", "ignore")
+            if "/" in rel:
+                rels.append(rel)
+        i = j + 4
+    out, seen = [], set()
+    for rel in rels:
+        full = os.path.normpath(os.path.join(model_dir, rel)).replace(os.sep, "/")
+        cand = full + ".txb.desktop.zstd"
+        if cand in pack_names and cand not in seen:
+            role = classify_texture(cand)
+            if role:
+                seen.add(cand)
+                out.append((role, cand))
+    return out
+
+
+
 # ------------------------------------------------------------------ per-unit
 def tex_stem(filename: str) -> str:
     """Texture-set name for a txb filename: the part, with the PBR role suffix
@@ -140,25 +167,36 @@ def tex_stem(filename: str) -> str:
     return base
 
 
-def drawblock_spans(mesh, idx_len):
+def drawblock_spans(mesh, idx_len, next_offsets=None):
     """(offset, count) runs for a mesh.
 
     Prefer the parsed `indexCount`: it is exact whenever the tag walker decoded
     it, and its value is validated against the array length and the next offset.
     Only when it is missing or implausible (some BETA units encode it with a tag
     the walker does not decode, and box_laser_00 omits it entirely) fall back to
-    the gap to the next offset.  Deriving unconditionally was wrong: a few units
-    list a drawblock whose offset sits far before its own block, which made a
-    mesh's span swallow the rest of the array.
+    the gap to the next known offset.
+
+    `next_offsets` must be the sorted offsets of EVERY drawblock in the scene, not
+    just this mesh's.  Using only this mesh's offsets made the last block run to
+    the end of the array: F-15J's chest block (indexCount missing) then claimed
+    315,264 indices and swallowed the whole buffer, which is why that unit's
+    "chest" object came out as a 192,273-vertex full-body mesh.
     """
     dbs = [b for b in (mesh.get("drawblocks") or [])
            if b.get("indexOffset") is not None]
     if not dbs:
         return []
     offs = sorted({int(b["indexOffset"]) for b in dbs})
+    glob = sorted(int(o) for o in (next_offsets or []))
     out = []
     for k, o in enumerate(offs):
         end = offs[k + 1] if k + 1 < len(offs) else idx_len
+        # tighten the end with the nearest block start after this one, anywhere
+        # in the scene
+        for g in glob:
+            if g > o:
+                end = min(end, g)
+                break
         room = int(end) - o
         declared = None
         for b in dbs:
@@ -282,11 +320,24 @@ def _scene_to_rig(scene) -> Dict:
     return rig
 
 
-# For TSF mechs the 10 LOD-0 meshes are the body parts below, in file order.
-# This order was confirmed three ways: the mesh's own skin joints, the texture
-# set names present in the pack, and the size of each texture set.
-LOD0_PARTS = ["chest", "head", "j_unit", "arm_l", "mountb",
-              "mountg", "leg", "arm_r", "mountb", "mountg"]
+# Every TSF mesh record carries `nodeIndex`, and that node is named after the
+# body part.  This is the authoritative mapping and it REPLACES the old
+# positional table, which silently mislabelled whole unit families: the order is
+# not fixed.  Most units list chest,head,j_unit,l_arm,l_b_mount,l_g_mount,leg,
+# r_arm,r_b_mount,r_g_mount, but the F-15 family puts both arms LAST and every
+# Type-94 puts `chest` last -- so a position-based guess gave the real chest mesh
+# a mount's material and name, which is exactly "the chest is missing".
+#
+# Part label -> texture set.  The left and right mounts share one set each, and
+# `j_unit` is textured by the set called `unitj`; this matches the material names
+# recorded in the file itself (chest_mat, head_mat, unitj_mat, arm_l_mat,
+# arm_r_mat, mountb_mat, mountg_mat, leg_mat).
+PART_SETS = {
+    "chest": "chest", "head": "head", "j_unit": "unitj",
+    "l_arm": "arm_l", "r_arm": "arm_r", "leg": "leg",
+    "l_b_mount": "mountb", "r_b_mount": "mountb",
+    "l_g_mount": "mountg", "r_g_mount": "mountg",
+}
 
 # Fallback for assets whose mesh count differs (weapons): infer the texture set
 # from the joints the mesh actually deforms.  Order matters -- the more specific
@@ -314,30 +365,61 @@ def part_from_joints(joint_names) -> Optional[str]:
     return None
 
 
-def resolve_part(mesh_index: int, lod, joint_names, n_lod0: int,
-                 tex_stems=None) -> str:
-    """Texture-set name for one mesh.
+def node_map(scene) -> Dict:
+    """nodeIndex -> node name, for resolving a mesh to its body part."""
+    return {n.get("nodeIndex"): n.get("name") for n in scene.nodes}
 
-    TSF units have 10 LOD0 parts in a fixed file order, and most of those part
-    names match a texture set directly.  Two do not: `j_unit` (hip thrusters) is
-    textured by the `unitj` set.  Getting this wrong is expensive, because a
-    name with no matching set used to fall back to "the first set in the unit" --
-    which created a base-colour-only material, cached it under THAT part's name,
-    and then handed it to the real mesh of that part, silently stripping its
-    normal / roughness / metallic maps.  So map the known aliases and otherwise
-    return a name only if the unit actually ships it.
+
+def part_of_node(name: Optional[str]) -> Optional[str]:
+    """Part label for a mesh's node name.
+
+    Handles the few suffixed variants: `head_shadow` (kakasi's shadow proxies)
+    and `l_b_mount1` (the YF-23 ships a second pair of mounts).
     """
-    ALIAS = {"j_unit": "unitj"}
-    if lod in (None, 0) and n_lod0 == len(LOD0_PARTS) \
-            and 0 <= mesh_index < len(LOD0_PARTS):
-        want = ALIAS.get(LOD0_PARTS[mesh_index], LOD0_PARTS[mesh_index])
-        if not tex_stems or want in tex_stems:
-            return want
-    if tex_stems:
-        if "common" in tex_stems:
-            return "common"
-        return sorted(tex_stems)[0]
-    return part_from_joints(joint_names) or DEFAULT_PART
+    if not name:
+        return None
+    if name in PART_SETS:
+        return name
+    base = name.rstrip("0123456789")
+    if base in PART_SETS:
+        return name              # keep `l_b_mount1` distinct for labelling
+    if name.endswith("_shadow"):
+        stem = name[: -len("_shadow")]
+        if stem in PART_SETS or stem.rstrip("0123456789") in PART_SETS:
+            return name
+    return None
+
+
+def texset_of(part: Optional[str], tex_stems=None) -> Optional[str]:
+    """Texture set for a part label, if the unit ships it."""
+    if not part:
+        return None
+    base = part.rstrip("0123456789").replace("_shadow", "")
+    want = PART_SETS.get(base) or PART_SETS.get(part)
+    if want and (not tex_stems or want in tex_stems):
+        return want
+    return None
+
+
+def resolve_part(mesh_index: int, lod, joint_names, n_lod0: int,
+                 tex_stems=None, node_name: Optional[str] = None) -> str:
+    """Part label for one mesh.
+
+    Prefers the mesh's own node name; falls back to the joints it deforms, and
+    only then to position.  The material key is derived separately (`texset_of`),
+    so a part can be labelled `l_b_mount`/`r_b_mount` while both use the one
+    `mountb` texture set.
+    """
+    got = part_of_node(node_name)
+    if got:
+        return got
+    guess = part_from_joints(joint_names)
+    if guess:
+        return guess
+    if lod in (None, 0) and 0 <= mesh_index < 10:
+        return ["chest", "head", "j_unit", "l_arm", "l_b_mount",
+                "l_g_mount", "leg", "r_arm", "r_b_mount", "r_g_mount"][mesh_index]
+    return DEFAULT_PART
 
 
 def uv_preferred_shape(meshes_out) -> Optional[Tuple[int, int]]:
@@ -405,6 +487,18 @@ def build_unit(pack: FpdArchive, info: Dict, ps, want_tex=True,
     print(f"  [{info['unit']}] parsing scene")
     scn = pack.payload(info["model"])
     scene = ps.Scene(scn, info["model"])
+
+    # Merge in textures the scene references elsewhere.  Units such as
+    # type94_jp_00 ship almost no atlas of their own and point at sibling model
+    # directories, so a local-directory scan leaves most parts without a set.
+    model_dir = os.path.dirname(info["model"])
+    pack_names = {e.name for e in pack.entries}
+    have_tex = {t for _r, t in info.get("textures") or []}
+    extra = [t for t in scene_texture_refs(scn, model_dir, pack_names)
+             if t[1] not in have_tex]
+    if extra:
+        info.setdefault("textures", []).extend(extra)
+        print(f"    +{len(extra)} texture(s) resolved from relative references")
     # verify() is a diagnostic; a few units trip an empty-array check inside it
     # (meshes whose joint list is empty), which must not block the export.
     try:
@@ -412,6 +506,7 @@ def build_unit(pack: FpdArchive, info: Dict, ps, want_tex=True,
     except Exception as exc:
         print(f"    (verify skipped: {type(exc).__name__}: {exc})")
     rig = _scene_to_rig(scene)
+    nidx2name = node_map(scene)
     vc = rig.get("vertexCount")
     ic = rig.get("indexCount")
     print(f"    {vc if vc is not None else '?'} verts  "
@@ -469,6 +564,12 @@ def build_unit(pack: FpdArchive, info: Dict, ps, want_tex=True,
     # texture sets this unit actually ships, keyed the same way the writer keys
     # its `materials` entries (filename stem without the role suffix)
     tex_stems = {tex_stem(t) for _role, t in (info.get("textures") or [])}
+    # every drawblock start in the scene, so a block with a missing indexCount
+    # can be bounded by the next block anywhere, not by the end of the array
+    all_block_offsets = sorted({
+        int(b["indexOffset"])
+        for m_ in rig["meshes"] for b in (m_.get("drawblocks") or [])
+        if b.get("indexOffset") is not None})
     mesh_vbase = 0            # running vertex offset in the merged output
     mesh_ibase = 0            # running index offset in out_tris
     local_indices = False     # per-mesh submeshes renumber from 0
@@ -517,7 +618,8 @@ def build_unit(pack: FpdArchive, info: Dict, ps, want_tex=True,
             # (loose vertices, exploded limbs).  Submesh extraction is immune to
             # that mismatch and costs only duplicated vertex records.
             spans = drawblock_spans(
-                mesh, len(scene.idx) if scene.idx is not None else 0)
+                mesh, len(scene.idx) if scene.idx is not None else 0,
+                all_block_offsets)
             if not spans or vn == 0:
                 print(f"    ! mesh {mi}: no index block, skipped")
                 continue
@@ -604,7 +706,9 @@ def build_unit(pack: FpdArchive, info: Dict, ps, want_tex=True,
         joint_names = sk["nodeNames"]
 
         # optionally detach mount geometry that the game parents to the neck
-        part_guess = resolve_part(mi, mesh.get("lod"), joint_names, n_lod0)
+        node_name = nidx2name.get(mesh.get("nodeIndex"))
+        part_guess = resolve_part(mi, mesh.get("lod"), joint_names, n_lod0,
+                                  node_name=node_name)
         if detach_neck and part_guess in ("mountb", "mountg"):
             neck = [i for i, nm in enumerate(joint_names) if nm == "Neck_M"]
             if neck and jts.size and w.size:
@@ -635,14 +739,16 @@ def build_unit(pack: FpdArchive, info: Dict, ps, want_tex=True,
             raise ValueError(
                 f"mesh {mi}: joint index {jmax} >= skeleton size "
                 f"{len(joint_names)} after clamping -- bug in the weight path")
+        label = resolve_part(mi, mesh.get("lod"), joint_names, n_lod0,
+                             tex_stems, node_name=node_name)
         meshes_out.append({
             "index": mi,
             "vertexStart": voff,
             "vertexCount": vn,
             "localIndices": local_indices,
             "lod": mesh.get("lod"),
-            "part": resolve_part(mi, mesh.get("lod"), joint_names, n_lod0,
-                                 tex_stems),
+            "part": label,
+            "texset": texset_of(label, tex_stems),
             "skeletonIndex": mesh["skeletonIndex"],
             "jointNames": joint_names,
             "drawblocks": mesh.get("drawblocks", []),
@@ -782,10 +888,10 @@ def main():
 
     # BETA enemies live in their own output tree so they never mix with the TSFs
     global OUT_ROOT
-    if args.kind != "tsf":
-        # keep the trees apart, but honour MIKHAIL_OUT
-        OUT_ROOT = os.path.join(os.path.dirname(_cfg.OUT.rstrip(os.sep)),
-                                os.path.basename(_cfg.OUT) + "_" + args.kind)
+    if args.kind == "beta":
+        OUT_ROOT = os.path.join(UNPACK, "export_beta")
+    elif args.kind == "weapon":
+        OUT_ROOT = os.path.join(UNPACK, "export_weapon")
 
     pack = FpdArchive(PACK)
     ps = parse_scene_module()

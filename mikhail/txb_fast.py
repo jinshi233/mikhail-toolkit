@@ -232,7 +232,12 @@ def decode(d: bytes, prefer: Optional[Tuple[int, int]] = None,
     if verbose:
         print(f"   {w}x{h} {'colmajor' if cm else 'raster'} smooth={best[0]:.4f}")
     if kind == "bc4":
-        r = a[:, :, 2]                       # decode_bc4 stores in BLUE
+        # decode_bc4 puts its single channel in what texture2ddecoder calls
+        # "blue"; `_rgba` then swaps B and R, so it lands in channel 0.  Reading
+        # channel 2 here (as the pre-swap code did) returned zeros, which made
+        # every roughness / metalness / AO map solid black -- roughness 0 is a
+        # perfect mirror, so all materials rendered as dark mirrors.
+        r = a[:, :, 0]
         a = np.dstack([r, r, r, np.full((h, w), 255, np.uint8)])
     return w, h, fmt, a
 
@@ -241,11 +246,7 @@ if __name__ == "__main__":
     import time
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from mikhail_assets import FpdArchive
-    try:
-        from . import config as _cfg
-    except ImportError:
-        import config as _cfg
-    pack = FpdArchive(_cfg.PACK)
+    pack = FpdArchive(r"D:\SteamLibrary\steamapps\common\Project MIKHAIL\obb\pack.bin")
     base = "root/assets/data/chr/tsf/f22a_00/model/"
     for nm in sys.argv[1:] or ["chest_bc", "mountb_bc", "leg_ao", "head_bc"]:
         d = pack.payload(base + nm + ".png.txb.desktop.zstd")

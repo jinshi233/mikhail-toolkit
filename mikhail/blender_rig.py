@@ -108,25 +108,17 @@ def make_material(name, textures, base_dir):
         n = img(have["metalness"], True, (x, -500))
         nt.links.new(n.outputs["Color"], bsdf.inputs["Metallic"])
     if "emissive" in have:
-        # The `_cm` map is a GLOW MASK covering whole blocks of the sheet, not a
-        # colour map.  Driving Emission Color from it directly at full strength
-        # paints the model neon and hides the base colour, so gate it by the base
-        # colour (glow only where the surface colour agrees) and keep it subtle.
+        # This is the baked `_em.png` (palette colours masked onto the model),
+        # NOT the raw `_cm` region mask.  The mask is flat red/green/blue blobs
+        # that mean "which UserColor slot", so using it as a colour painted whole
+        # models with blotches and made the eye strip blue.
+        # keep the surface opaque; FBX round-trips like to wire base-colour
+        # alpha into this socket, which made every mesh render as a black
+        # silhouette
+        bsdf.inputs["Alpha"].default_value = 1.0
         n = img(have["emissive"], False, (x, -760))
-        mul = nt.nodes.new("ShaderNodeMixRGB")
-        mul.blend_type = "MULTIPLY"
-        mul.inputs[0].default_value = 1.0
-        mul.location = (x + 300, -760)
-        nt.links.new(n.outputs["Color"], mul.inputs[1])
-        if "baseColor" in have:
-            bn = nt.nodes.new("ShaderNodeTexImage")
-            bn.location = (x - 400, -760)
-            bn.image = bpy.data.images.load(have["baseColor"])
-            nt.links.new(bn.outputs["Color"], mul.inputs[2])
-        else:
-            mul.inputs[2].default_value = (1.0, 1.0, 1.0, 1.0)
-        nt.links.new(mul.outputs["Color"], bsdf.inputs["Emission Color"])
-        bsdf.inputs["Emission Strength"].default_value = 0.6
+        nt.links.new(n.outputs["Color"], bsdf.inputs["Emission Color"])
+        bsdf.inputs["Emission Strength"].default_value = 1.4
     return mat
 
 

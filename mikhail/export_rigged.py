@@ -847,13 +847,99 @@ def build_unit(pack: FpdArchive, info: Dict, ps, want_tex=True,
                 w_, h_, fmt_, arr = tex
                 from PIL import Image
                 os.makedirs(os.path.dirname(abs_p), exist_ok=True)
-                Image.fromarray(arr, "RGBA").save(abs_p)
+                # Opaque maps are written as RGB on purpose.  Blender's FBX
+                # exporter wires the Base Color image's alpha into the Principled
+                # Alpha socket, and the DCC importer then honours it -- with a
+                # grey albedo the alpha channel reads ~0.19, so every mesh came in
+                # almost fully transparent and rendered as a black silhouette (or
+                # vanished).  No alpha channel, no alpha link.
+                if arr.shape[2] == 4 and int(arr[:, :, 3].min()) >= 250:
+                    Image.fromarray(arr[:, :, :3], "RGB").save(abs_p)
+                else:
+                    Image.fromarray(arr, "RGBA").save(abs_p)
                 print(f"    tex {part}/{role}: {w_}x{h_} {fmt_}")
             if os.path.exists(abs_p):
-                out["materials"].append({"part": part, "role": role,
+                # `_cm` classifies as "emissive" by suffix, but it is the
+                # UserColor region mask; labelling it emissive made Blender drive
+                # Emission Color from flat red/blue/green blobs.
+                real_role = "userColorMask" if stem.endswith("_cm") else role
+                out["materials"].append({"part": part, "role": real_role,
                                          "png": rel})
+        # bake the user-colour emissive maps from the region masks
+        for m in write_emissive_for_unit(info, unit_dir, pack, tex_cache, pref):
+            if not any(x["part"] == m["part"] and x["role"] == "emissive"
+                       for x in out["materials"]):
+                out["materials"].append(m)
     print(f"    done in {time.time()-t0:.1f}s")
     return out
+
+
+# ---------------------------------------------------------------- user colours
+# `_cm` is NOT an emissive colour map.  It is a flat REGION MASK: every texel is
+# pure red, green, blue or black, and the material's `UserColor_*` parameters
+# supply the colour for each slot.  Using the mask directly as an emission colour
+# is what painted whole models with flat red/blue/green blotches and turned the
+# eye strip blue.  The palette below is the engine default and was verified
+# identical across every TSF, so it is not per-unit data.
+USER_COLORS = {
+    "red":   (1.00, 0.04, 0.00),
+    "green": (0.22, 1.00, 0.36),
+    "blue":  (0.00, 0.68, 1.00),
+    "yellow": (0.80, 0.88, 0.27),
+}
+
+# Which palette entry each mask slot takes.  The visor / sensor strip sits in the
+# mask's BLUE slot, so that slot maps to YELLOW -- confirmed against the model's
+# own region layout (the blue region is the Y-band of the face).  `red` covers
+# ~80% of the body and is the plain armour, so it gets no emission at all.
+SLOT_EMISSIVE = {"blue": "yellow", "green": "green"}
+
+
+def bake_user_emissive(mask_arr, strength_px=None):
+    """Turn the region mask into an emissive colour map via the palette."""
+    import numpy as np
+    c = mask_arr[:, :, :3].astype(np.int16)
+    r, g, b = c[:, :, 0], c[:, :, 1], c[:, :, 2]
+    out = np.zeros((c.shape[0], c.shape[1], 3), dtype=np.float32)
+    slots = {
+        "red":    (r > 170) & (g < 70) & (b < 70),
+        "green":  (g > 170) & (r < 70) & (b < 70),
+        "blue":   (b > 170) & (r < 70) & (g < 70),
+    }
+    for slot, mask in slots.items():
+        target = SLOT_EMISSIVE.get(slot)
+        if not target:
+            continue
+        col = USER_COLORS[target]
+        out[mask, 0] = col[0]
+        out[mask, 1] = col[1]
+        out[mask, 2] = col[2]
+    return (np.clip(out, 0.0, 1.0) * 255).astype(np.uint8)
+
+
+def write_emissive_for_unit(info, unit_dir, pack, tex_cache, pref):
+    """Bake `<part>_em.png` for every part that ships a mask."""
+    import numpy as np
+    from PIL import Image
+    made = []
+    for role, tname in list(info.get("textures") or []):
+        if role != "userColorMask" and "_cm" not in os.path.basename(tname):
+            continue
+        part = tex_stem(tname)
+        stem = os.path.basename(tname).split(".")[0]
+        try:
+            key = (tname,)
+            if key not in tex_cache or tex_cache[key] is None:
+                tex_cache[key] = txb_fast.decode(pack.payload(tname), prefer=pref)
+            _w, _h, _f, arr = tex_cache[key]
+        except Exception:
+            continue
+        em = bake_user_emissive(arr)
+        rel = f"textures/{part}_em.png"
+        Image.fromarray(em, "RGB").save(os.path.join(unit_dir, rel))
+        made.append({"part": part, "role": "emissive", "png": rel})
+    return made
+
 
 
 # --------------------------------------------------------------------- blender

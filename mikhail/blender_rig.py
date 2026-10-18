@@ -107,18 +107,9 @@ def make_material(name, textures, base_dir):
     if "metalness" in have:
         n = img(have["metalness"], True, (x, -500))
         nt.links.new(n.outputs["Color"], bsdf.inputs["Metallic"])
-    if "emissive" in have:
-        # This is the baked `_em.png` (palette colours masked onto the model),
-        # NOT the raw `_cm` region mask.  The mask is flat red/green/blue blobs
-        # that mean "which UserColor slot", so using it as a colour painted whole
-        # models with blotches and made the eye strip blue.
-        # keep the surface opaque; FBX round-trips like to wire base-colour
-        # alpha into this socket, which made every mesh render as a black
-        # silhouette
-        bsdf.inputs["Alpha"].default_value = 1.0
-        n = img(have["emissive"], False, (x, -760))
-        nt.links.new(n.outputs["Color"], bsdf.inputs["Emission Color"])
-        bsdf.inputs["Emission Strength"].default_value = 1.4
+    # Emission is handled by the dedicated glow material (slot 1), which covers
+    # the shared glow drawblock -- the eyes / sensors.  Driving emission from the
+    # part atlas as well double-counted it and tinted the whole panel.
     return mat
 
 
@@ -236,6 +227,29 @@ def build_armature(nodes, skel, name, all_skeletons):
 
 
 # ----------------------------------------------------------------------- mesh
+def make_glow_material(name):
+    """Emissive material for the shared glow drawblock (eyes, sensors, vents).
+
+    Built from a Principled BSDF rather than a bare Emission node: the FBX
+    exporter has no representation for a pure Emission shader and rebuilds it as
+    a plain Principled, which discarded the colour.  Principled's emission
+    inputs survive the round-trip.
+
+    Colour is the material palette's UserColor_Yellow, the engine default
+    (0.80, 0.88, 0.27) verified identical across all 43 units.
+    """
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    bsdf = next(n for n in nt.nodes if n.type == "BSDF_PRINCIPLED")
+    bsdf.inputs["Base Color"].default_value = (0.0, 0.0, 0.0, 1.0)
+    bsdf.inputs["Roughness"].default_value = 1.0
+    bsdf.inputs["Metallic"].default_value = 0.0
+    bsdf.inputs["Emission Color"].default_value = (0.80, 0.88, 0.27, 1.0)
+    bsdf.inputs["Emission Strength"].default_value = 1.1
+    return mat
+
+
 def build_part(data, mesh, arm, base_dir, name, mat_cache):
     vn = mesh["vertexCount"]
     pos = np.asarray(mesh["positions"], dtype=np.float64)
@@ -275,15 +289,32 @@ def build_part(data, mesh, arm, base_dir, name, mat_cache):
     shift = v0 if not local else 0
     ntri = sum((db.get("indexCount") or 0) // 3 for db in mesh["drawblocks"])
     polys = []
+    poly_glow = []
     seg = idx[i0:i0 + ntri * 3] if idx else []
+    # per-triangle "is glow" flags, from the drawblock ranges in file order
+    dflags = mesh.get("drawblockGlow") or []
+    tri_glow = []
+    for di, db in enumerate(mesh.get("drawblocks") or []):
+        nb = (db.get("indexCount") or 0) // 3
+        tri_glow.extend([bool(dflags[di]) if di < len(dflags) else False] * nb)
     for k in range(0, len(seg) - 2, 3):
         a, b, c = seg[k] - shift, seg[k + 1] - shift, seg[k + 2] - shift
         if 0 <= a < vn and 0 <= b < vn and 0 <= c < vn \
                 and a != b and b != c and a != c:
             polys.append((a, b, c))
+            t = k // 3
+            poly_glow.append(tri_glow[t] if t < len(tri_glow) else False)
     me.from_pydata([tuple(v) for v in p], [], polys)
     me.validate(verbose=False)
     me.update()
+    # tag the glow triangles on material slot 1 (assigned further down)
+    if len(poly_glow) == len(me.polygons):
+        for i_, g_ in enumerate(poly_glow):
+            if g_:
+                me.polygons[i_].material_index = 1
+    elif any(poly_glow):
+        print(f"    ! {name}: {len(poly_glow)} flagged vs "
+              f"{len(me.polygons)} polygons; glow split skipped")
 
     # UV: layers are indexed per *loop*, not per vertex.
     # The scene stores per-texture UV channel indices; the game's basecolor /
@@ -368,6 +399,19 @@ def build_part(data, mesh, arm, base_dir, name, mat_cache):
         if key not in mat_cache:
             mat_cache[key] = make_material(f"{name}_{key}", mats, base_dir)
         obj.data.materials.append(mat_cache[key])
+    # slot 1: the shared glow material (eyes / sensors).  It is a flat emissive
+    # in the palette's Yellow, which is what those parts use; leaving them on the
+    # part atlas is why the visor came out blue instead of yellow.
+    if any(poly_glow):
+        gkey = "__glow__"
+        if gkey not in mat_cache:
+            mat_cache[gkey] = make_glow_material(f"{name}_glow")
+        if len(obj.data.materials) == 0:
+            obj.data.materials.append(mat_cache[gkey])
+        else:
+            obj.data.materials.append(mat_cache[gkey])
+        n_glow = sum(1 for p_ in obj.data.polygons if p_.material_index == 1)
+        print(f"    {mesh.get('part')}: {n_glow} glow polygons on slot 1")
     return obj
 
 

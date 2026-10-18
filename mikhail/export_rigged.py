@@ -205,8 +205,13 @@ def drawblock_spans(mesh, idx_len, next_offsets=None):
                 break
         c = declared if (declared and 3 <= declared <= room) else room
         c = min(c, room)
+        mat_id = None
+        for b in dbs:
+            if int(b["indexOffset"]) == o:
+                mat_id = b.get("materialIndex")
+                break
         if c >= 3:
-            out.append((o, c // 3 * 3))
+            out.append((o, c // 3 * 3, mat_id))
     return out
 
 
@@ -237,6 +242,7 @@ def _scene_to_rig(scene) -> Dict:
     # block's span from the neighbouring offsets and the array length, then take
     # a mesh's vertex span as the range its indices address.
     def blocks_of(m):
+        # drawblock_spans now returns (offset, count, materialIndex)
         return drawblock_spans(m, len(scene.idx) if scene.idx is not None else 0)
 
     def used(m):
@@ -269,7 +275,7 @@ def _scene_to_rig(scene) -> Dict:
             if not spans:
                 ranges.append(None)
                 continue
-            seg = np.concatenate([a[o:o + c] for o, c in spans])
+            seg = np.concatenate([a[o:o + c] for o, c, _m in spans])
             ranges.append((int(seg.min()), int(seg.max())))
         live = [r for r in ranges if r]
         # Topology, decided on the LOD0 meshes by how index values relate to the
@@ -624,7 +630,7 @@ def build_unit(pack: FpdArchive, info: Dict, ps, want_tex=True,
                 print(f"    ! mesh {mi}: no index block, skipped")
                 continue
             tri = np.concatenate([scene.idx[o_:o_ + c_]
-                                  for (o_, c_) in spans]).astype(np.int64)
+                                  for (o_, c_, _m) in spans]).astype(np.int64)
             tri = tri[:tri.size // 3 * 3].reshape(-1, 3)
             used = np.unique(tri.ravel())
             if used.max() >= len(V):
@@ -641,8 +647,9 @@ def build_unit(pack: FpdArchive, info: Dict, ps, want_tex=True,
             mesh_ibase += tri.size
             local_indices = True
             written.append((voff, vn, tri.size))
-            mesh["drawblocks"] = [{"indexOffset": o_, "indexCount": c_}
-                                  for (o_, c_) in spans]
+            mesh["drawblocks"] = [{"indexOffset": o_, "indexCount": c_,
+                                   "materialIndex": m_}
+                                  for (o_, c_, m_) in spans]
             mesh["vertexStart"] = voff
         # mesh_vbase is advanced inside each branch that assigns voff
         pos = sl[:, OFF_POS:OFF_POS + 12].copy().view("<f4").reshape(vn, 3)
@@ -815,6 +822,30 @@ def build_unit(pack: FpdArchive, info: Dict, ps, want_tex=True,
         for m, (vs, vn_, ni) in zip(meshes_out, written):
             m["indexStart"] = cur_i
             cur_i += ni
+    # Which drawblocks belong to the shared "glow" material?  Every mesh carries
+    # a second drawblock whose materialIndex is the SAME value across chest,
+    # head, j_unit, leg and both arms -- that is the eyes / sensors material.
+    # Folding it into the part material is why the visor took the atlas colour
+    # instead of the palette's glow colour.
+    # Count how many DISTINCT body parts use each materialIndex, LOD0 only.  The
+    # glow material is the one shared by several parts (chest + head + j_unit +
+    # leg + both arms); a part's own material is used by one part only, or by its
+    # left/right pair at most.  Counting every LOD instead made each index appear
+    # five times and flagged all of them.
+    _mat_parts = {}
+    for m_ in meshes_out:
+        if m_.get("lod") not in (None, 0):
+            continue
+        for idx_ in {b.get("materialIndex") for b in (m_.get("drawblocks") or [])
+                     if b.get("materialIndex") is not None}:
+            _mat_parts.setdefault(idx_, set()).add(m_.get("part"))
+    glow_ids = {k for k, v in _mat_parts.items() if len(v) >= 3}
+    for m_ in meshes_out:
+        m_["drawblockGlow"] = [bool(b.get("materialIndex") in glow_ids)
+                               for b in (m_.get("drawblocks") or [])]
+    if glow_ids:
+        print(f"    glow material index(es): {sorted(glow_ids)}")
+
     np.save(os.path.join(unit_dir, name + ".indices.npy"),
             np.asarray(idx, dtype=np.uint32))
 

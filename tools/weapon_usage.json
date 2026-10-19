@@ -1,0 +1,86 @@
+{
+ "weapon_users": {
+  "gun82_00": [
+   "f15e_00",
+   "f15j_00",
+   "type94_jp_00"
+  ],
+  "shi92_00": [
+   "type94_02"
+  ],
+  "gun87_00": [
+   "type94_02"
+  ],
+  "gun87s_00": [
+   "type94_02"
+  ],
+  "bl74_00": [
+   "type94_jp_00"
+  ]
+ },
+ "weapon_poses": {
+  "bl74_00": [
+   "bl74_00"
+  ],
+  "gun82_00": [
+   "gun82_00"
+  ],
+  "gun87_00": [
+   "gun87_00"
+  ]
+ },
+ "tsf_weapons": {
+  "f15e_00": [
+   "gun82_00"
+  ],
+  "f15j_00": [
+   "gun82_00"
+  ],
+  "type94_02": [
+   "gun87_00",
+   "gun87s_00",
+   "shi92_00"
+  ],
+  "type94_jp_00": [
+   "bl74_00",
+   "gun82_00"
+  ]
+ },
+ "weapon_joints": {
+  "bl74_00": [
+   "Root_M",
+   "Root_M/blade1",
+   "Root_M/blade1/blade2",
+   "bl74_00"
+  ],
+  "gun82_00": [
+   "Root_M",
+   "Root_M/Root_offset_M",
+   "Root_M/Root_offset_M/barrel120mm",
+   "Root_M/Root_offset_M/barrel36mm",
+   "Root_M/Root_offset_M/handle",
+   "Root_M/Root_offset_M/mag120mm_offset_M",
+   "Root_M/Root_offset_M/mag120mm_offset_M/mag120mm_M",
+   "Root_M/Root_offset_M/mag36mm_offset_M",
+   "Root_M/Root_offset_M/mag36mm_offset_M/mag36mm_M",
+   "gun82_00"
+  ],
+  "gun87_00": [
+   "Root_M",
+   "Root_M/barrel120mm_offset",
+   "Root_M/barrel120mm_offset/barrel120mm",
+   "Root_M/barrel36mm_offset",
+   "Root_M/barrel36mm_offset/barrel36mm",
+   "equip",
+   "equip/lod_high",
+   "equip/lod_high/body",
+   "equip/lod_high/body_shadow",
+   "equip/lod_low",
+   "equip/lod_low/body",
+   "equip/lod_low/body_shadow",
+   "equip/lod_middle",
+   "equip/lod_middle/body",
+   "equip/lod_middle/body_shadow"
+  ]
+ }
+}

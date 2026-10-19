@@ -22,23 +22,13 @@ STRIDES = (60, 64)
 # little lower, and they are not exported anyway.
 MIN_WINDING = 0.90
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
-try:
-    from .mikhail_assets import FpdArchive  # noqa: E402
-except ImportError:
-    from mikhail_assets import FpdArchive  # noqa: E402
+WS = r"D:\SteamLibrary\steamapps\common\Project MIKHAIL\unpack"
+sys.path.insert(0, os.path.join(WS, "fpd"))
+from mikhail_assets import FpdArchive
 import parse_scene as ps
-try:
-    from . import mesh_blobs  # noqa: E402
-except ImportError:
-    import mesh_blobs  # noqa: E402
+import mesh_blobs
 
-try:
-    from . import config as _cfg
-except ImportError:
-    import config as _cfg
-GAME = _cfg.GAME
+GAME = r"D:\SteamLibrary\steamapps\common\Project MIKHAIL"
 pack = FpdArchive(os.path.join(GAME, "obb", "pack.bin"))
 
 
@@ -55,10 +45,25 @@ def solve_unit(d, scene):
     a = scene.idx.astype(np.int64)
     pool = mesh_blobs.candidate_pool(d)
     out = [None] * len(scene.meshes)
+    # A drawblock may omit indexCount (missile_shot_00's meshes 1/3/4 do).  The
+    # old filter silently dropped those meshes, so they came back unsolved; the
+    # span can be recovered from the next drawblock start anywhere in the file.
+    all_offs = sorted({int(b["indexOffset"])
+                       for m_ in scene.meshes
+                       for b in (m_.get("drawblocks") or [])
+                       if b.get("indexOffset") is not None})
     for mi, m in enumerate(scene.meshes):
-        dbs = [b for b in (m.get("drawblocks") or [])
-               if (b.get("indexCount") or 0) >= 3
-               and b.get("indexOffset") is not None]
+        dbs = []
+        for b in (m.get("drawblocks") or []):
+            if b.get("indexOffset") is None:
+                continue
+            o = int(b["indexOffset"])
+            c = b.get("indexCount") or 0
+            if c < 3:
+                end = next((g for g in all_offs if g > o), len(a))
+                c = min(end, len(a)) - o
+            if c >= 3:
+                dbs.append({"indexOffset": o, "indexCount": c})
         if not dbs:
             continue
         tri = np.concatenate([a[b["indexOffset"]:b["indexOffset"] + b["indexCount"]]

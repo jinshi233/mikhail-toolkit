@@ -510,8 +510,16 @@ class Scene:
                     st = k
             if len(hits) - st > 1000:
                 runs.append((st, len(hits) - 1))
-            s, e = max(runs, key=lambda r: r[1] - r[0])
-            voff, vlen = int(hits[s]) - 0xC, (e - s + 1) * 60
+            if runs:
+                s, e = max(runs, key=lambda r: r[1] - r[0])
+                voff, vlen = int(hits[s]) - 0xC, (e - s + 1) * 60
+            else:
+                # Collision proxies (the box_* meshes) carry almost no vertex
+                # data, so no 1000-record run exists.  There is nothing to
+                # export for them; leave an empty vertex range instead of
+                # aborting the whole unit.
+                voff, vlen = 0, 0
+                self.notes.append("no vertex run found (collision proxy?)")
             self.notes.append("vertex blob located by 60-byte stride scan fallback")
         self.voff, self.vlen = voff, vlen
         self.vstride = 60
@@ -924,13 +932,9 @@ def load(path):
         return open(path, "rb").read()
     sys.path.insert(0, HERE)
     from fpd_extract import FpdArchive, load_keystream
-    try:
-        from . import config as _cfg
-    except ImportError:
-        import config as _cfg
-    root = _cfg.GAME
+    root = r"D:\SteamLibrary\steamapps\common\Project MIKHAIL"
     pack = FpdArchive(os.path.join(root, "obb", "pack.bin"),
-                      load_keystream(_cfg.KEY))
+                      load_keystream(os.path.join(HERE, "decryptKey.bin")))
     name = path.replace("\\", "/")
     if name not in pack.by_name:
         for ext in (".zstd", ""):

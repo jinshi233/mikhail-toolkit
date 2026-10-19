@@ -93,10 +93,14 @@ def find_units(pack: FpdArchive, kind: str) -> List[Dict]:
             if model != unit:
                 continue
         else:
-            cat, unit, model = m.group(1), m.group(2), m.group(3)
-            if model != unit:
-                continue
-            unit = f"{cat}/{unit}"
+            # Weapons and equipment.  Several models can share one folder --
+            # missile_00 ships missile_00 / missile_cap_00 / missile_rader_00 /
+            # missile_shot_00 together -- so key on the MODEL, not the folder,
+            # otherwise every extra part of a multi-model folder is dropped.
+            cat, folder, model = m.group(1), m.group(2), m.group(3)
+            # Key on the bare model name so the output folder matches the TSF /
+            # BETA convention (bl74_00, gun82_00 ...), not "weapon__bl74_00".
+            unit = model
         units.setdefault(unit, {"unit": unit, "model": e.name, "textures": [],
                                 "kind": kind})
     for info in units.values():
@@ -558,8 +562,13 @@ def build_unit(pack: FpdArchive, info: Dict, ps, want_tex=True,
         winds = [x["wind"] for x in sol if x]
         print(f"    per-mesh: {got}/{len(scene.meshes)} meshes, median winding "
               f"{np.median(winds):.4%}, min {min(winds):.4%}")
-        if got < len(scene.meshes):
-            raise ValueError(f"only {got}/{len(scene.meshes)} meshes solved")
+        # Only LOD0 is exported, so a higher LOD that the winding oracle cannot
+        # resolve is not an error.  Requiring every LOD to solve rejected
+        # missile_shot_00 (2/5) purely because its LOD1/LOD2 copies are tiny.
+        lod0_missing = [i for i, m in enumerate(rig["meshes"])
+                        if m.get("lod") in (None, 0) and sol[i] is None]
+        if lod0_missing:
+            raise ValueError(f"LOD0 meshes unsolved: {lod0_missing}")
         per_mesh = sol
         vcount = sum(x["nverts"] for x in sol if x)
         rig["vertexCount"] = vcount

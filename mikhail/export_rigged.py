@@ -80,6 +80,8 @@ def find_units(pack: FpdArchive, kind: str) -> List[Dict]:
         pat = re.compile(r"root/assets/data/chr/tsf/([^/]+)/model/([^/]+)\.ma\.scn\.zstd$")
     elif kind == "beta":
         pat = re.compile(r"root/assets/data/chr/beta/([^/]+)/model/([^/]+)\.ma\.scn\.zstd$")
+    elif kind == "prop":
+        pat = re.compile(r"root/assets/data/(?:bg/envAssets/object|chr/adv)/(.+)/([^/]+)\.ma\.scn\.zstd$")
     else:
         pat = re.compile(r"root/assets/data/equip/([^/]+)/([^/]+)/model/([^/]+)\.ma\.scn\.zstd$")
     for e in pack.entries:
@@ -92,6 +94,14 @@ def find_units(pack: FpdArchive, kind: str) -> List[Dict]:
             unit, model = m.group(1), m.group(2)
             if model != unit:
                 continue
+        elif kind == "prop":
+            # Environment props.  The scene files sit at varying depths
+            # (…/object/<ground>/<name>/model/x.ma.scn, or …/<ground>/x.ma.scn),
+            # and a couple of names exist in two grounds, so disambiguate those.
+            pre, model = m.group(1), m.group(2)
+            unit = model
+            if unit in units:
+                unit = f"{model}__{pre.split('/')[0]}"
         else:
             # Weapons and equipment.  Several models can share one folder --
             # missile_00 ships missile_00 / missile_cap_00 / missile_rader_00 /
@@ -104,6 +114,11 @@ def find_units(pack: FpdArchive, kind: str) -> List[Dict]:
         units.setdefault(unit, {"unit": unit, "model": e.name, "textures": [],
                                 "kind": kind})
     for info in units.values():
+        if kind == "prop":
+            # Props sit next to hundreds of unrelated ground textures, so a
+            # directory scan would ship the whole ground tile set.  Use only what
+            # the scene actually references (resolved in build_unit).
+            continue
         d = os.path.dirname(info["model"])
         for e in pack.entries:
             if not e.name.startswith(d + "/") or e.size == 0:
@@ -138,7 +153,9 @@ def scene_texture_refs(data: bytes, model_dir: str, pack_names):
             a -= 1
         if a > 0 and (data[a - 1] & 0x7F) in (0x06, 0x26):
             rel = data[a:j + 4].decode("ascii", "ignore")
-            if "/" in rel:
+            # Props often reference a bare filename ("tank_00_bc.png") with no
+            # directory part; requiring a slash dropped all of them.
+            if rel and len(rel) < 200:
                 rels.append(rel)
         i = j + 4
     out, seen = [], set()
@@ -186,8 +203,15 @@ def drawblock_spans(mesh, idx_len, next_offsets=None):
     315,264 indices and swallowed the whole buffer, which is why that unit's
     "chest" object came out as a 192,273-vertex full-body mesh.
     """
-    dbs = [b for b in (mesh.get("drawblocks") or [])
-           if b.get("indexOffset") is not None]
+    # A prop's first drawblock often has indexOffset = None, meaning "starts at
+    # 0".  Filtering those out skipped the whole mesh, so every environment prop
+    # exported with zero geometry.
+    dbs = []
+    for b in (mesh.get("drawblocks") or []):
+        o = b.get("indexOffset")
+        dbs.append({"indexOffset": 0 if o is None else int(o),
+                    "indexCount": b.get("indexCount"),
+                    "materialIndex": b.get("materialIndex")})
     if not dbs:
         return []
     offs = sorted({int(b["indexOffset"]) for b in dbs})
@@ -582,9 +606,8 @@ def build_unit(pack: FpdArchive, info: Dict, ps, want_tex=True,
     # every drawblock start in the scene, so a block with a missing indexCount
     # can be bounded by the next block anywhere, not by the end of the array
     all_block_offsets = sorted({
-        int(b["indexOffset"])
-        for m_ in rig["meshes"] for b in (m_.get("drawblocks") or [])
-        if b.get("indexOffset") is not None})
+        0 if b.get("indexOffset") is None else int(b["indexOffset"])
+        for m_ in rig["meshes"] for b in (m_.get("drawblocks") or [])})
     mesh_vbase = 0            # running vertex offset in the merged output
     mesh_ibase = 0            # running index offset in out_tris
     local_indices = False     # per-mesh submeshes renumber from 0
@@ -1000,10 +1023,13 @@ def run_blender(blender: str, json_path: str, outdir: str) -> bool:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--kind", choices=["tsf", "beta", "weapon"], default="tsf")
+    ap.add_argument("--kind", choices=["tsf", "beta", "weapon", "prop"],
+                    default="tsf")
     ap.add_argument("--name", nargs="*", default=None,
                     help="one or more unit codes; omit for all")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--match", default=None,
+                    help="regex; only export units whose id matches")
     ap.add_argument("--no-tex", action="store_true")
     ap.add_argument("--no-blender", action="store_true")
     ap.add_argument("--json-only", action="store_true")
@@ -1018,10 +1044,16 @@ def main():
         OUT_ROOT = os.path.join(UNPACK, "export_beta")
     elif args.kind == "weapon":
         OUT_ROOT = os.path.join(UNPACK, "export_weapon")
+    elif args.kind == "prop":
+        OUT_ROOT = os.path.join(UNPACK, "export_prop")
 
     pack = FpdArchive(PACK)
     ps = parse_scene_module()
     units = find_units(pack, args.kind)
+    if args.match:
+        rx = re.compile(args.match)
+        units = [u for u in units if rx.search(u["unit"])]
+        print(f"--match {args.match!r}: {len(units)} unit(s)")
     if args.name:
         wanted = set(args.name)
         units = [u for u in units
